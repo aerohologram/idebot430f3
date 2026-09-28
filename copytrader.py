@@ -16,6 +16,13 @@ class CopyTrader:
         self.whale_buys = {}      # mint -> {wallet: ts}
         self.consensus_done = set()
         self.whale_first_price = {}  # mint -> цена в момент покупки ПЕРВОГО кита
+        self._sem = None  # lazy: создаём внутри event loop (иначе падает на py3.9 без loop)
+        self._last_cleanup = time.time()
+
+    def _get_sem(self):
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(10)  # не больше 10 параллельных fetch (иначе 429)
+        return self._sem
         
     def load_wallets(self):
         import os
@@ -87,15 +94,27 @@ class CopyTrader:
         if signature in self.processed_sigs: return
         self.processed_sigs.add(signature)
         if len(self.processed_sigs) > 1000: self.processed_sigs.clear()
-        
-        # Даем RPC ноде 1.5 секунды на индексацию
-        await asyncio.sleep(1.5)
-        
-        tx_data = await self.fetch_transaction(signature)
-        if not tx_data or "result" not in tx_data or not tx_data["result"]:
-            await asyncio.sleep(1.5)
+
+        # Чистим протухшие консенсусы раз в 5 мин (иначе whale_buys растёт бесконечно)
+        if time.time() - self._last_cleanup > 300:
+            self._last_cleanup = time.time()
+            now_c = time.time()
+            for m in list(self.whale_buys.keys()):
+                self.whale_buys[m] = {w: t for w, t in self.whale_buys[m].items() if now_c - t <= 600}
+                if not self.whale_buys[m]:
+                    self.whale_buys.pop(m, None)
+            if len(self.consensus_done) > 2000:
+                self.consensus_done.clear()
+
+        # Даем RPC ноде время на индексацию (было 1.5с — теряли ракеты)
+        await asyncio.sleep(0.8)
+
+        async with self._get_sem():
             tx_data = await self.fetch_transaction(signature)
-            if not tx_data or "result" not in tx_data or not tx_data["result"]: return
+            if (not tx_data or "result" not in tx_data or not tx_data["result"]):
+                await asyncio.sleep(0.8)
+                # (fetch уже выполнен выше под семафором)
+        if not tx_data or "result" not in tx_data or not tx_data["result"]: return
 
         meta = tx_data["result"].get("meta", {})
         if not meta or meta.get("err"): return # Ошибка транзакции (Failed)
@@ -123,8 +142,10 @@ class CopyTrader:
                         self.whale_first_price[mint] = await self.get_token_price(mint)
                         print(f"👁️ WHALE WATCH: {trader_name} купил {mint[:12]}... слежу за ценой (вход на 2-м ките).")
                     print(f"🚨 COPYTRADE: {trader_name} купил {mint[:12]}... (китов за 10 мин: {n_whales}/{getattr(config, 'WHALE_CONSENSUS', 2)})")
-                    if n_whales < getattr(config, 'WHALE_CONSENSUS', 2) or mint in self.consensus_done:
-                        return  # ждём раннего консенсуса
+                    if mint in self.consensus_done:
+                        continue  # уже входили — не дублируем
+                    if n_whales < getattr(config, 'WHALE_CONSENSUS', 2):
+                        continue  # ждём раннего консенсуса, но проверяем остальных китов в той же tx
                     self.consensus_done.add(mint)
                     # Guard от опоздания: цена не должна улететь от точки входа первого кита
                     cur_price = await self.get_token_price(mint)
@@ -132,18 +153,19 @@ class CopyTrader:
                     max_runup = getattr(config, 'WHALE_MAX_RUNUP', 1.35)
                     if first_price > 0 and cur_price > first_price * max_runup:
                         print(f"🚫 [WHALE LATE] {mint[:12]}: цена +{(cur_price/first_price-1)*100:.0f}% с покупки 1-го кита — киты уже надули, входим в их выход.")
-                        return
+                        self.consensus_done.add(mint)
+                        continue
                     print(f"🐋 SMART MONEY CONSENSUS: {n_whales} кита, цена ещё не улетела (+{(cur_price/first_price-1)*100:.0f}%) — РАННИЙ вход!")
                     if len(self.tracker.get_open_positions()) >= config.MAX_CONCURRENT_POSITIONS:
                         print("🚫 Лимит позиций. Пропускаем копитрейд.")
-                        return
+                        continue
                         
                     if self.analyzer:
                         print(f"🤖 Передаем сигнал кита ИИ на проверку...")
                         is_safe = await self.analyzer.analyze_token(mint)
                         if not is_safe:
                             print(f"🚫 ИИ забраковал токен кита {trader_name}. Спасли твои деньги от рагпула!")
-                            return
+                            continue
                         else:
                             print(f"✅ ИИ одобрил токен кита! Покупаем!")
                     else:

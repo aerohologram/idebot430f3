@@ -137,3 +137,9 @@ LOTTERY_MIN_M5_PCT = 0.80  # Лотерея только для мощных в�
 LOTTERY_SIZE_MULT = 0.25
 WHALE_CONSENSUS = 2  # вход на 2-м ките (3-й = уже поздно)
 WHALE_MAX_RUNUP = 1.35  # цена не должна вырасти >35% с момента покупки первого кита
+
+# === FAST STREAM (0-сек discovery, идея DoradoDevs/solana-pumpfun-sniper-bot) ===
+FAST_STREAM_ENABLED = True
+FAST_WINDOW_SEC = 120   # окно ранней тяги: уникальные buyers за первые 2 мин
+FAST_MIN_BUYERS = 6     # >=6 уникальных покупателей за 2 мин = горячий
+FAST_MIN_TRADES = 10    # или >=10 трейдов за окно

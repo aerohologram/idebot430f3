@@ -234,10 +234,25 @@ async def scanner_loop(analyzer, tracker):
             if open_count < config.MAX_CONCURRENT_POSITIONS:
                 print(f"🔎 Сканируем монеты... (Открыто: {open_count}/{config.MAX_CONCURRENT_POSITIONS})")
                 
+                # 0. FAST свежие (0-сек discovery) — приоритет, без 600с бана
+                mints_to_scan = []
+                try:
+                    import fast_stream
+                    if getattr(config, "FAST_STREAM_ENABLED", True):
+                        hot = fast_stream.get_hot_fresh()
+                        fresh = fast_stream.get_fresh_mints(180)
+                        if hot:
+                            print(f"⚡ FAST: {len(hot)} горячих свежих (buyers>= {getattr(config,'FAST_MIN_BUYERS',6)}) — проверяю первыми!")
+                            mints_to_scan.extend(hot)
+                        if fresh:
+                            mints_to_scan.extend(fresh)
+                except Exception as _e:
+                    print(f"⚡ FAST fallback: {_e}")
+
                 # 1. VIP Токены (DexScreener API)
                 tokens = await analyzer.fetch_latest_tokens()
-                mints_to_scan = [p.get("tokenAddress") for p in tokens if p.get("tokenAddress")]
-                
+                mints_to_scan.extend([p.get("tokenAddress") for p in tokens if p.get("tokenAddress")])
+
                 # 2. Уличные Токены (Берем молодые ракеты от 5 до 20 минут)
                 mature_mints = birth_tracker.get_mature_tokens(3, 25)  # Было 5-20: шире окно молодняка = больше ракет
                 if mature_mints:
@@ -322,7 +337,7 @@ async def scanner_loop(analyzer, tracker):
                         print(f"⚠️ Ошибка анализа {mint[:8]}: {type(e).__name__}: {e}. Сканирую дальше.")
         except Exception as e:
             print(f"Ошибка в цикле сканера: {e}")
-        await asyncio.sleep(30)
+        await asyncio.sleep(15)  # было 30: импульсы m5 живут минуты, опрос чаще = раньше вход
 
 from copytrader import CopyTrader
 import os
@@ -613,8 +628,13 @@ async def async_main():
             await get_sol_price()
             await asyncio.sleep(300)
     
+    from fast_stream import fast_stream_loop, fast_candidate_loop
     await asyncio.gather(
         position_manager_loop(analyzer, tracker),
+        birth_wss_loop(analyzer, tracker),  # был определён но НЕ запущен — роддом стоял пустой!
+        birdeye_loop(analyzer, tracker),  # был импортирован но не запущен
+        fast_stream_loop(),  # ⚡ 0-сек discovery NewToken + trades
+        fast_candidate_loop(analyzer, tracker),  # ⚡ горячие свежие мимо 600с бана
         scanner_loop(analyzer, tracker),
         copy_trader.listen(),
         fomo_signal_loop(analyzer, tracker),
