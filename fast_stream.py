@@ -24,8 +24,10 @@ try:
 except Exception:
     birth_tracker = None
 
-# mint -> {first_seen, name, symbol, dev, initial_buy_sol, buyers:set, trades:int, vol_sol:float}
+# mint -> {first_seen, name, symbol, dev, initial_buy_sol, buyers:set, trades:int, vol_sol:float, last_mcap_sol:float}
 _registry = {}
+TRADES_SEEN = 0
+TOKENS_SEEN = 0
 _registry_lock = asyncio.Lock() if False else None  # простой dict, GIL хватает
 _seen_mints = collections.OrderedDict()  # для дедупликации логов
 
@@ -58,6 +60,8 @@ def note_new_token(data: dict):
             oldest = sorted(_registry.items(), key=lambda kv: kv[1]["first_seen"])[:50]
             for k, _ in oldest:
                 _registry.pop(k, None)
+        global TOKENS_SEEN
+        TOKENS_SEEN += 1
         _registry[mint] = {
             "first_seen": now,
             "name": str(data.get("name", ""))[:40],
@@ -68,6 +72,7 @@ def note_new_token(data: dict):
             "trades": 0,
             "vol_sol": 0.0,
             "last_trade_ts": 0.0,
+            "last_mcap_sol": float(data.get("marketCapSol", 0) or 0),
         }
         if birth_tracker is not None:
             try:
@@ -92,8 +97,16 @@ def note_trade(data: dict):
             sol_amt = sol_amt / 1e9
     except Exception:
         sol_amt = 0.0
+    global TRADES_SEEN
+    TRADES_SEEN += 1
     r["trades"] += 1
     r["last_trade_ts"] = time.time()
+    try:
+        _mc = float(data.get("marketCapSol", 0) or 0)
+        if _mc > 0:
+            r["last_mcap_sol"] = _mc
+    except Exception:
+        pass
     if tx_type == "buy":
         if trader:
             r["buyers"].add(trader)
@@ -123,7 +136,9 @@ def get_fresh_mints(max_age_sec: int = 180) -> list:
 
 def get_stats(mint: str) -> dict:
     r = _registry.get(mint, {})
-    return {"buyers": len(r.get("buyers", ())), "trades": r.get("trades", 0), "age_sec": time.time() - r.get("first_seen", 0)}
+    return {"buyers": len(r.get("buyers", ())), "trades": r.get("trades", 0),
+            "age_sec": time.time() - r.get("first_seen", 0),
+            "last_mcap_sol": r.get("last_mcap_sol", 0)}
 
 
 async def fast_stream_loop():
@@ -142,25 +157,40 @@ async def fast_stream_loop():
                 backoff = 2
                 await ws.send(json.dumps({"method": "subscribeNewToken"}))
                 print("⚡ [FAST] Подписан на NewToken")
-                # отдельный таск: периодически подписываемся на trades свежих минтов
+                # отдельный таск: держим ОДНУ подписку на trades свежих минтов.
+                # PumpPortal заменяет подписку каждым сообщением, поэтому шлём весь
+                # список ключей разом (до 50 самых свежих) каждые 10с, а не по одному.
                 async def resub_trades():
-                    subscribed = set()
+                    last_keys = []
                     while True:
                         try:
                             fresh = get_fresh_mints(180)
-                            new = [m for m in fresh if m not in subscribed][:20]
-                            for m in new:
+                            # самые свежие первые
+                            fresh_sorted = sorted(fresh, key=lambda m: _registry.get(m, {}).get("first_seen", 0), reverse=True)[:50]
+                            if fresh_sorted != last_keys and fresh_sorted:
                                 try:
-                                    await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [m]}))
-                                    subscribed.add(m)
+                                    await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": fresh_sorted}))
+                                    last_keys = fresh_sorted
+                                    print(f"⚡ [FAST] Подписан на trades {len(fresh_sorted)} свежих минтов")
                                 except Exception:
                                     break
-                            await asyncio.sleep(15)
+                            await asyncio.sleep(10)
                         except asyncio.CancelledError:
                             break
                         except Exception:
-                            await asyncio.sleep(15)
+                            await asyncio.sleep(10)
+                async def heartbeat():
+                    while True:
+                        try:
+                            await asyncio.sleep(300)
+                            n_hot = len(get_hot_fresh())
+                            print(f"💓 [FAST] heartbeat: токенов 0-сек={TOKENS_SEEN}, трейдов={TRADES_SEEN}, в реестре={len(_registry)}, горячих={n_hot}")
+                        except asyncio.CancelledError:
+                            break
+                        except Exception:
+                            pass
                 resub = asyncio.create_task(resub_trades())
+                hb = asyncio.create_task(heartbeat())
                 try:
                     async for message in ws:
                         try:
@@ -177,6 +207,7 @@ async def fast_stream_loop():
                             note_new_token({**data, "txType": "create"})
                 finally:
                     resub.cancel()
+                    hb.cancel()
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -208,6 +239,33 @@ async def fast_candidate_loop(analyzer, tracker):
                     st = get_stats(mint)
                     print(f"⚡ [FAST] Горячий свежий: {mint[:10]}... buyers={st['buyers']} trades={st['trades']} age={st['age_sec']:.0f}с — проверяю анализатором")
                     is_good = await analyzer.analyze_token(mint)
+                    if is_good is None:
+                        # DexScreener ещё не проиндексировал (0-3 мин), но тяга по WSS есть.
+                        # Early-bird лотерейный микро-вход вместо ожидания (иначе ракета улетает
+                        # пока ждём API). Размер как LOTTERY, цена через Jupiter.
+                        _early_max_age = getattr(config, "FAST_EARLY_MAX_AGE_SEC", 180)
+                        if st["age_sec"] <= _early_max_age:
+                            _early_size = getattr(config, "TRADE_AMOUNT_USD", 10.0) * getattr(config, "LOTTERY_SIZE_MULT", 0.25)
+                            try:
+                                from jupiter import JupiterAPI
+                                _px = await JupiterAPI.get_prices([mint])
+                                entry_price = (_px or {}).get(mint, 0.0) or 0.0
+                            except Exception:
+                                entry_price = 0.0
+                            if entry_price > 0 and _early_size >= 1.0:
+                                _deployed = sum(getattr(q, "amount_usd", 0) for q in tracker.get_open_positions().values())
+                                _cap = tracker.get_total_capital() * getattr(config, "MAX_DEPLOYED_PCT", 0.60)
+                                if _deployed + _early_size <= _cap:
+                                    tracker.add_position("FAST-EARLY", mint, entry_price, _early_size, is_mature=True,
+                                                         source=f"FAST-EARLY:b{st['buyers']}t{st['trades']}")
+                                    print(f"⚡ [FAST-EARLY] Микро-вход {mint[:10]}... ${entry_price:.8f} x${_early_size:.1f} (DS пуст, тяга WSS)")
+                                    break
+                                else:
+                                    print(f"⚡ [FAST-EARLY] {mint[:10]}... пропуск: exposure забит")
+                            else:
+                                print(f"⚡ [FAST-EARLY] {mint[:10]}... пропуск: цены ещё нет нигде (Jupiter=0)")
+                        else:
+                            print(f"⚡ [FAST] {mint[:10]}... DS пуст и возраст {st['age_sec']:.0f}с > лимита — жду индексацию")
                     if is_good is True:
                         pair_data = await analyzer.fetch_token_data(mint)
                         entry_price = float((pair_data or {}).get("priceUsd", 0) or 0)

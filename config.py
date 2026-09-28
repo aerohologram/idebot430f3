@@ -17,8 +17,8 @@ PUMPPORTAL_WSS = "wss://pumpportal.fun/api/data"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 
 # Supabase DB Config
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
 
 # Paper Trading Config
 PAPER_PORTFOLIO_FILE = "portfolio.json"
@@ -131,7 +131,7 @@ SNIPER_BUYERS_WINDOW_MIN = 5
 VIP_MAX_M5_PCT = 0.60  # Было 1.00 - брали вершину +100%. 60% - компромисс: ракеты пропускаем, вертикали нет
 PULLBACK_MIN_M5_PCT = 0.05  # Было 0.07: 8 часов без ракет - расширяем сеть. Раги держат FRESH/holders/liq/model
 PULLBACK_M1_MIN_PCT = -0.15  # Но и не летим в падающий нож (максимум -15% за минуту)
-PULLBACK_M1_MAX_PCT = 0.00  # Было 0.08 - покупали зеленую свечу = вершину. Вернули 0.00: ждем откат
+PULLBACK_M1_MAX_PCT = 0.03  # Было 0.00: строго красный откат = 0 входов (m1 у ракет всегда >0). +3% пускает ранний импульс, вертикаль (+8% и выше) всё ещё ждёт откат
 PULLBACK_MAX_H1_PCT = 3.00  # Было 10.00 (1000%) - брали вершины типа +3152% Drip / +33009% SI. Теперь >+300% за час = поздно
 LOTTERY_MIN_M5_PCT = 0.80  # Лотерея только для мощных вертикалей от 80%
 LOTTERY_SIZE_MULT = 0.25
@@ -143,3 +143,4 @@ FAST_STREAM_ENABLED = True
 FAST_WINDOW_SEC = 120   # окно ранней тяги: уникальные buyers за первые 2 мин
 FAST_MIN_BUYERS = 6     # >=6 уникальных покупателей за 2 мин = горячий
 FAST_MIN_TRADES = 10    # или >=10 трейдов за окно
+FAST_EARLY_MAX_AGE_SEC = 180  # early-микро-вход только если токену <3 мин (DS ещё пуст)
