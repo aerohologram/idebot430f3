@@ -29,12 +29,17 @@ async def fetch_birdeye_trending():
                         mint = item.get("address")
                         if mint and mint not in tokens:
                             tokens.append(mint)
+                elif response.status in (400, 401, 403, 429):
+                    # квота/ключ: дальше долбить каждые 15с бессмысленно — вернём флаг
+                    err_text = (await response.text())[:200]
+                    print(f"🛑 Birdeye quota/key ({response.status}): {err_text} — пауза 30 мин.")
+                    return None  # None = квота кончилась, нужен длинный backoff
                 else:
                     err_text = await response.text()
                     print(f"Ошибка Birdeye API: {response.status} - {err_text}")
         except Exception as e:
             print(f"Ошибка подключения к Birdeye: {e}")
-            
+
     return tokens
 
 async def birdeye_loop(analyzer: Analyzer, tracker):
@@ -52,6 +57,10 @@ async def birdeye_loop(analyzer: Analyzer, tracker):
                 continue
                 
             trending_mints = await fetch_birdeye_trending()
+            if trending_mints is None:
+                # квота Birdeye исчерпана — спим 30 мин вместо спама каждые 15с
+                await asyncio.sleep(1800)
+                continue
             
             # Фильтруем уже обработанные и в кулдауне
             new_mints = []
