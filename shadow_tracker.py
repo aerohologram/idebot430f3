@@ -21,8 +21,8 @@ class ShadowTracker:
         if self.use_supabase:
             self.supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
             print("☁️ [ShadowTracker] Подключен к Supabase PostgreSQL")
-        else:
-            self.init_db()
+        # SQLite всегда: fallback при PGRST125 иначе падает с no such table.
+        self.init_db()
 
     def init_db(self):
         """Создает таблицы для Теневого логгера"""
@@ -207,8 +207,13 @@ class ShadowTracker:
                                     ))
 
             except Exception as e:
-                print(f"Ошибка в цикле Shadow Watcher: {e}")
-                
+                _msg = str(e)
+                if self.use_supabase and ("PGRST125" in _msg or "Invalid path" in _msg):
+                    self.use_supabase = False
+                    print("⚠️ [Shadow Watcher] Supabase таблица недоступна (PGRST125 — проверь таблицы/URL в Supabase). Перешёл на локальный SQLite.")
+                else:
+                    print(f"Ошибка в цикле Shadow Watcher: {e}")
+
             await asyncio.sleep(300)
 
     def analyze_missed_opportunities(self):

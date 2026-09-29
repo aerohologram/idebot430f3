@@ -104,18 +104,21 @@ class PaperTracker:
 
     def save_portfolio(self):
         data = {k: getattr(v, "model_dump", v.dict)() for k, v in self.positions.items()}
-        
+
         # 1. Сохраняем локально (для Streamlit)
         try:
             with open(self.filename, 'w') as f:
                 json.dump(data, f, indent=4)
-        except Exception:
-            pass
-            
+        except Exception as e:
+            print(f"⚠️ Ошибка записи {self.filename}: {e}")
+
         # 2. Сохраняем в Supabase (Render-proof).
         # ЗАЩИТА ОТ WIPE: пустой словарь в облако никогда не пишем —
         # пустая память + живой слепок в облаке = не трогаем облако.
         if not data:
+            return
+        # backoff: битый Supabase не долбим каждые 2с (иначе спам в логах)
+        if getattr(self, "_sb_dead_until", 0) and time.time() < self._sb_dead_until:
             return
         sb = self._supabase()
         if sb is None:
@@ -127,8 +130,18 @@ class PaperTracker:
                 "confidence": 0,
                 "status": "SYSTEM"
             }).execute()
+            self._sb_dead_until = 0
         except Exception as e:
-            print(f"⚠️ Ошибка сохранения портфеля в Supabase: {e}")
+            _msg = str(e)
+            if "PGRST125" in _msg or "Invalid path" in _msg:
+                # корень: кривой SUPABASE_URL или нет таблицы trades_pump.
+                # Отключаем облако на сессию, работаем на локальном файле.
+                self._sb_dead_until = float("inf")
+                host = str(getattr(config, "SUPABASE_URL", "?"))[:40]
+                print(f"⚠️ Supabase недоступен (PGRST125). Проверь URL ({host}...) и таблицу trades_pump. Портфель живёт в {self.filename}.")
+            else:
+                self._sb_dead_until = time.time() + 600
+                print(f"⚠️ Ошибка сохранения портфеля в Supabase: {e} (пауза 10 мин)")
 
     def get_open_positions(self) -> Dict[str, VirtualPosition]:
         return {k: v for k, v in self.positions.items() if v.status == "open"}
@@ -185,12 +198,18 @@ class PaperTracker:
         print(f"📝 PAPER BUY: {symbol} ({mint}) | Amount: ${amount_usd} | Price: ${entry_price} | Src: {source} | Chain: {chain}")
         
         # === СОХРАНЕНИЕ В SUPABASE (ENTRY) ===
-        # Сохраняем опыт в базу
+        # Сохраняем опыт в базу (общий инстанс, не плодим клиентов)
         try:
-            from trade_logger import TradeLogger
+            from trade_logger import trade_logger as _tl
             import asyncio
-            logger = TradeLogger()
-            asyncio.create_task(logger.log_entry(mint, ml_features_dict, ml_confidence, is_mature))
+            try:
+                _loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _loop = None
+            if _loop is not None:
+                _loop.create_task(_tl.log_entry(mint, ml_features_dict, ml_confidence, is_mature))
+            else:
+                print("⚠️ Нет event loop для логирования входа — журнал сделок пропустит ENTRY")
         except Exception as e:
             print(f"⚠️ Ошибка логирования входа: {e}")
 
@@ -262,10 +281,16 @@ class PaperTracker:
             
             # === СОХРАНЕНИЕ ОПЫТА ДЛЯ ИИ (Continuous Learning) ===
             try:
-                from trade_logger import TradeLogger
+                from trade_logger import trade_logger as _tl
                 import asyncio
-                logger = TradeLogger()
-                asyncio.create_task(logger.log_exit(pos.mint, pnl_pct * 100, pos.exit_reason, pos.is_mature))
+                try:
+                    _loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    _loop = None
+                if _loop is not None:
+                    _loop.create_task(_tl.log_exit(pos.mint, pnl_pct * 100, pos.exit_reason, pos.is_mature))
+                else:
+                    print("⚠️ Нет event loop для логирования выхода — журнал сделок пропустит EXIT")
             except Exception as e:
                 print(f"⚠️ Ошибка сохранения опыта: {e}")
 

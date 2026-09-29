@@ -17,10 +17,7 @@ PUMPPORTAL_WSS = "wss://pumpportal.fun/api/data"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 
 # Supabase DB Config
-_sb = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-if _sb.endswith("/rest/v1"):
-    _sb = _sb[: -len("/rest/v1")]  # клиент сам добавляет /rest/v1, дубль даёт PGRST125
-SUPABASE_URL = _sb
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
 SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
 
 # Paper Trading Config
@@ -79,19 +76,19 @@ ROBINHOOD_GT_NETWORK = "robinhood"  # slug GeckoTerminal
 ROBINHOOD_RPC_URL = "https://rpc.mainnet.chain.robinhood.com"
 ROBINHOOD_EXPLORER = "https://robinhoodchain.blockscout.com"
 ROBINHOOD_MIN_LIQUIDITY = 8000  # EVM-пулы Uniswap тоньше Solana - порог ниже
-ROBINHOOD_SCAN_INTERVAL = 60  # Было 45: импульсы m5 живут минуты, опрос чаще = вход раньше (SI успел остыть)
+ROBINHOOD_SCAN_INTERVAL = 90  # Было 25: 3 сети x 2 GT-запроса = 429. EVM-импульсы живут дольше solana-пампов
 EVM_MIN_M5_PCT = 7.0  # Было 10.0: окно входа шире = чаще сделки. Раги держат остальные гейты
 EVM_RESCAN_COOLDOWN = 300  # Было 600: перепроверка отклонённых через 5 мин (волна может прийти позже)
 
 # === BASE (EVM L2, там сидят мемы с fomo.family: musebook, DELTA...) ===
 # Тот же EVM-движок, slug DexScreener "base". Пулы глубже - порог $15к.
 BASE_ENABLED = True
-BASE_SCAN_INTERVAL = 60  # как Robinhood: чаще опрос = раньше вход
+BASE_SCAN_INTERVAL = 90  # как Robinhood: реже = без 429
 
 # === BSC (GSTOCK и co с fomo.family сидят там) ===
 # Тот же движок, slug "bsc".
 BSC_ENABLED = True
-BSC_SCAN_INTERVAL = 60
+BSC_SCAN_INTERVAL = 90
 
 # --- Сайзинг: база $6, conviction x2 ---
 # Тир решает ПОДТВЕРЖДЁННЫЙ импульс рынка (m5 + вести), а не скор модели

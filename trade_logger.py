@@ -23,8 +23,9 @@ class TradeLogger:
         if self.use_supabase:
             self.supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
             print("☁️ [TradeLogger] Подключен к Supabase PostgreSQL")
-        else:
-            self._init_db()
+        # SQLite держим всегда: при падении Supabase запись уходит туда,
+        # иначе fallback падает с no such table и сделка теряется.
+        self._init_db()
 
     def _init_db(self):
         """Создает таблицы, если их нет."""
@@ -54,23 +55,41 @@ class TradeLogger:
         """
         table_name = "trades_raydium" if is_mature else "trades_pump"
         
-        def _insert():
+        try:
+            _feat = json.dumps(features)
+        except Exception:
+            _feat = json.dumps(str(features))
+        def _insert_sqlite():
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    f"INSERT OR REPLACE INTO {table_name} (mint, features, confidence) VALUES (?, ?, ?)",
+                    (mint, _feat, confidence)
+                )
+        async def _run():
             if self.use_supabase:
-                data = {
-                    "mint": mint,
-                    "features": json.dumps(features),
-                    "confidence": confidence,
-                    "status": "OPEN",
-                    "entry_time": datetime.utcnow().isoformat()
-                }
-                self.supabase.table(table_name).upsert(data).execute()
-            else:
-                with sqlite3.connect(self.db_path) as conn:
-                    conn.execute(
-                        f"INSERT OR REPLACE INTO {table_name} (mint, features, confidence) VALUES (?, ?, ?)",
-                        (mint, json.dumps(features), confidence)
-                    )
-        await asyncio.to_thread(_insert)
+                try:
+                    data = {
+                        "mint": mint,
+                        "features": _feat,
+                        "confidence": confidence,
+                        "status": "OPEN",
+                        "entry_time": datetime.utcnow().isoformat()
+                    }
+                    await asyncio.to_thread(self.supabase.table(table_name).upsert(data).execute)
+                    return
+                except Exception as e:
+                    _msg = str(e)
+                    if "PGRST125" in _msg or "Invalid path" in _msg:
+                        self.use_supabase = False
+                        print("⚠️ [TradeLogger] Supabase недоступен (PGRST125) — пишу журнал в локальный SQLite.")
+                    else:
+                        print(f"⚠️ [TradeLogger] Supabase ENTRY fail ({type(e).__name__}) — пишу в SQLite.")
+            await asyncio.to_thread(_insert_sqlite)
+        try:
+            await _run()
+        except Exception as e:
+            print(f"⚠️ [TradeLogger] ENTRY {mint[:12]}... не записан никуда: {type(e).__name__}: {e}")
+            return
         print(f"🧠 [TradeLogger] Записан опыт входа для {mint} (Conf: {confidence}%) в {table_name}")
 
     async def log_exit(self, mint: str, pnl_pct: float, exit_reason: str, is_mature: bool = False):
@@ -79,22 +98,39 @@ class TradeLogger:
         """
         table_name = "trades_raydium" if is_mature else "trades_pump"
         
-        def _update():
+        def _update_sqlite():
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    f"UPDATE {table_name} SET pnl = ?, exit_reason = ?, status = 'CLOSED', exit_time = ? WHERE mint = ?",
+                    (pnl_pct, exit_reason, datetime.utcnow().isoformat(), mint)
+                )
+                return cur.rowcount
+        async def _run():
             if self.use_supabase:
-                data = {
-                    "pnl": pnl_pct,
-                    "exit_reason": exit_reason,
-                    "status": "CLOSED",
-                    "exit_time": datetime.utcnow().isoformat()
-                }
-                self.supabase.table(table_name).update(data).eq("mint", mint).execute()
-            else:
-                with sqlite3.connect(self.db_path) as conn:
-                    conn.execute(
-                        f"UPDATE {table_name} SET pnl = ?, exit_reason = ?, status = 'CLOSED', exit_time = ? WHERE mint = ?",
-                        (pnl_pct, exit_reason, datetime.utcnow().isoformat(), mint)
-                    )
-        await asyncio.to_thread(_update)
+                try:
+                    data = {
+                        "pnl": pnl_pct,
+                        "exit_reason": exit_reason,
+                        "status": "CLOSED",
+                        "exit_time": datetime.utcnow().isoformat()
+                    }
+                    await asyncio.to_thread(self.supabase.table(table_name).update(data).eq("mint", mint).execute)
+                    return
+                except Exception as e:
+                    _msg = str(e)
+                    if "PGRST125" in _msg or "Invalid path" in _msg:
+                        self.use_supabase = False
+                        print("⚠️ [TradeLogger] Supabase недоступен (PGRST125) — закрытие пишу в SQLite.")
+                    else:
+                        print(f"⚠️ [TradeLogger] Supabase EXIT fail ({type(e).__name__}) — пишу в SQLite.")
+            n = await asyncio.to_thread(_update_sqlite)
+            if n == 0:
+                print(f"⚠️ [TradeLogger] EXIT без ENTRY в журнале: {mint[:12]}... (запись потеряна раньше)")
+        try:
+            await _run()
+        except Exception as e:
+            print(f"⚠️ [TradeLogger] EXIT {mint[:12]}... не записан: {type(e).__name__}: {e}")
+            return
         print(f"🧠 [TradeLogger] Опыт закрыт для {mint}. PnL: {pnl_pct}% | {table_name}")
 
 
@@ -238,8 +274,13 @@ class TradeLogger:
                                     ))
 
             except Exception as e:
-                print(f"Ошибка в цикле Post-Trade Watcher: {e}")
-                
+                _msg = str(e)
+                if self.use_supabase and ("PGRST125" in _msg or "Invalid path" in _msg):
+                    self.use_supabase = False
+                    print("⚠️ [TradeLogger] Supabase таблица недоступна (PGRST125 — проверь таблицы/URL в Supabase). Перешёл на локальный SQLite.")
+                else:
+                    print(f"Ошибка в цикле Post-Trade Watcher: {e}")
+
             await asyncio.sleep(300)
 
 

@@ -3,8 +3,14 @@ import aiohttp
 import config
 from analyzer import Analyzer
 
+_BIRDEYE_COOLDOWN_UNTIL = 0.0  # backoff при 400 Compute units limit exceeded
+
 async def fetch_birdeye_trending():
     """Получает трендовые токены Solana через Birdeye API"""
+    global _BIRDEYE_COOLDOWN_UNTIL
+    import time as _t
+    if _t.time() < _BIRDEYE_COOLDOWN_UNTIL:
+        return []  # молчим до конца cooldown, не спамим 400
     if not hasattr(config, 'BIRDEYE_API_KEY') or not config.BIRDEYE_API_KEY:
         print("⚠️ Birdeye API ключ не настроен в config.py!")
         await asyncio.sleep(60)
@@ -29,17 +35,16 @@ async def fetch_birdeye_trending():
                         mint = item.get("address")
                         if mint and mint not in tokens:
                             tokens.append(mint)
-                elif response.status in (400, 401, 403, 429):
-                    # квота/ключ: дальше долбить каждые 15с бессмысленно — вернём флаг
-                    err_text = (await response.text())[:200]
-                    print(f"🛑 Birdeye quota/key ({response.status}): {err_text} — пауза 30 мин.")
-                    return None  # None = квота кончилась, нужен длинный backoff
                 else:
                     err_text = await response.text()
-                    print(f"Ошибка Birdeye API: {response.status} - {err_text}")
+                    if response.status == 400 and "Compute units" in err_text:
+                        _BIRDEYE_COOLDOWN_UNTIL = _t.time() + 1800
+                        print("⚠️ Birdeye: лимит compute units исчерпан. Пауза 30 мин, дальше локальные источники.")
+                    else:
+                        print(f"Ошибка Birdeye API: {response.status} - {err_text}")
         except Exception as e:
             print(f"Ошибка подключения к Birdeye: {e}")
-
+            
     return tokens
 
 async def birdeye_loop(analyzer: Analyzer, tracker):
@@ -57,10 +62,6 @@ async def birdeye_loop(analyzer: Analyzer, tracker):
                 continue
                 
             trending_mints = await fetch_birdeye_trending()
-            if trending_mints is None:
-                # квота Birdeye исчерпана — спим 30 мин вместо спама каждые 15с
-                await asyncio.sleep(1800)
-                continue
             
             # Фильтруем уже обработанные и в кулдауне
             new_mints = []
@@ -119,4 +120,4 @@ async def birdeye_loop(analyzer: Analyzer, tracker):
         except Exception as e:
             print(f"Ошибка в birdeye_loop: {e}")
             
-        await asyncio.sleep(15) # Опрашиваем раз в 15 секунд (было 30)
+        await asyncio.sleep(120) # Было 15с: жрали compute units -> 400. Тренды живут часами, чаще не надо
