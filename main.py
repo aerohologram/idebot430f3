@@ -697,13 +697,23 @@ def load_dashboard_portfolio():
                 data = json.loads(res.data[0]["features"])
                 if data:
                     return data
+            # Слепок пуст, но это тоже ответ — запоминаем для диагностики
+            st.session_state["_pf_src"] = "supabase-empty"
+        else:
+            st.session_state["_pf_src"] = "no-supabase-env"
     except Exception as e:
+        st.session_state["_pf_src"] = f"supabase-err: {e}"[:300]
         print(f"⚠️ Дашборд: не удалось прочитать портфель из Supabase: {e}")
     # 2. Fallback: локальный файл
     try:
         with open(config.PAPER_PORTFOLIO_FILE, 'r') as f:
-            return json.load(f)
+            local = json.load(f)
+            if local and "_pf_src" not in st.session_state:
+                st.session_state["_pf_src"] = "local-file"
+            return local
     except (FileNotFoundError, json.JSONDecodeError):
+        if "_pf_src" not in st.session_state:
+            st.session_state["_pf_src"] = "no-local-file"
         return {}
     except Exception as e:
         print(f"⚠️ Дашборд: не удалось прочитать локальный портфель: {e}")
@@ -794,7 +804,10 @@ with tab1:
                 else:
                     st.info("История пуста.")
         else:
-            st.info("Файл портфеля пуст.")
+            _src = st.session_state.get("_pf_src", "?")
+            _has_env = bool(getattr(config, 'SUPABASE_URL', None) and getattr(config, 'SUPABASE_KEY', None))
+            st.warning(f"Файл портфеля пуст. Источник: {_src} | Supabase env: {'OK' if _has_env else 'НЕТ (данные живут только в RAM и умрут при рестарте Render!)'}")
+            st.caption("Проверь: 1) Render → Environment → SUPABASE_URL / SUPABASE_KEY заданы и сделан Redeploy. 2) В Supabase таблица trades_pump содержит строку mint=PORTFOLIO_STATE_V3. 3) Логи Render: ищи 'Портфель успешно загружен' или 'Supabase недоступен (PGRST125)'. Закрытые сделки при этом живы в журнале trades_pump/trades_raydium (status=CLOSED) — слепок можно восстановить.")
     except FileNotFoundError:
         st.info("Бот еще не совершил первую сделку.")
 

@@ -105,12 +105,37 @@ class PaperTracker:
     def save_portfolio(self):
         data = {k: getattr(v, "model_dump", v.dict)() for k, v in self.positions.items()}
 
-        # 1. Сохраняем локально (для Streamlit)
-        try:
-            with open(self.filename, 'w') as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            print(f"⚠️ Ошибка записи {self.filename}: {e}")
+        # 1. Сохраняем локально (для Streamlit).
+        # ЗАЩИТА ОТ WIPE: пустой памятью живой локальный файл не затираем.
+        # Иначе рестарт Render с пустой памятью за 2 сек убивал backup.
+        if not data:
+            try:
+                if os.path.exists(self.filename):
+                    with open(self.filename, 'r') as f:
+                        existing = json.load(f)
+                    if existing:
+                        print(f"🛡️ save_portfolio: память пуста, локальный файл ({len(existing)} поз.) НЕ трогаю.")
+                        # облако тоже не трогаем (ниже return)
+                    else:
+                        with open(self.filename, 'w') as f:
+                            json.dump(data, f, indent=4)
+                else:
+                    with open(self.filename, 'w') as f:
+                        json.dump(data, f, indent=4)
+            except (FileNotFoundError, json.JSONDecodeError):
+                try:
+                    with open(self.filename, 'w') as f:
+                        json.dump(data, f, indent=4)
+                except Exception as e:
+                    print(f"⚠️ Ошибка записи {self.filename}: {e}")
+            except Exception as e:
+                print(f"⚠️ Ошибка записи {self.filename}: {e}")
+        else:
+            try:
+                with open(self.filename, 'w') as f:
+                    json.dump(data, f, indent=4)
+            except Exception as e:
+                print(f"⚠️ Ошибка записи {self.filename}: {e}")
 
         # 2. Сохраняем в Supabase (Render-proof).
         # ЗАЩИТА ОТ WIPE: пустой словарь в облако никогда не пишем —
