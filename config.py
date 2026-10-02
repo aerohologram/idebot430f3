@@ -17,8 +17,25 @@ PUMPPORTAL_WSS = "wss://pumpportal.fun/api/data"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
 
 # Supabase DB Config
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
+def _clean_supabase_url(raw: str) -> str:
+    u = (raw or "").strip().strip('"').strip("'").rstrip("/")
+    # Частая ошибка: вставляют URL с суффиксом /rest/v1, /auth/v1 или dashboard-ссылку.
+    # PostgREST тогда отвечает PGRST125 Invalid path. Отрезаем до https://xxx.supabase.co
+    for suffix in ("/rest/v1", "/auth/v1", "/realtime/v1", "/storage/v1"):
+        if u.endswith(suffix):
+            u = u[: -len(suffix)].rstrip("/")
+    # dashboard-ссылка вида https://supabase.com/dashboard/project/<ref> -> чиним
+    if "supabase.com/dashboard/project/" in u:
+        try:
+            ref = u.split("/dashboard/project/")[1].split("/")[0].split("?")[0]
+            if ref:
+                return f"https://{ref}.supabase.co"
+        except Exception:
+            pass
+    return u
+
+SUPABASE_URL = _clean_supabase_url(os.getenv("SUPABASE_URL"))
+SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip().strip('"').strip("'")
 
 # Paper Trading Config
 PAPER_PORTFOLIO_FILE = "portfolio.json"
@@ -134,7 +151,7 @@ PULLBACK_M1_MIN_PCT = -0.15  # Но и не летим в падающий но�
 PULLBACK_M1_MAX_PCT = 0.03  # Было 0.00: строго красный откат = 0 входов (m1 у ракет всегда >0). +3% пускает ранний импульс, вертикаль (+8% и выше) всё ещё ждёт откат
 PULLBACK_MAX_H1_PCT = 3.00  # Было 10.00 (1000%) - брали вершины типа +3152% Drip / +33009% SI. Теперь >+300% за час = поздно
 LOTTERY_MIN_M5_PCT = 0.80  # Лотерея только для мощных вертикалей от 80%
-LOTTERY_SIZE_MULT = 0.25
+LOTTERY_SIZE_MULT = 0.30  # $10 * 0.30 = $3.0 билет (было 0.25 = $2.5)
 WHALE_CONSENSUS = 2  # вход на 2-м ките (3-й = уже поздно)
 WHALE_MAX_RUNUP = 1.35  # цена не должна вырасти >35% с момента покупки первого кита
 

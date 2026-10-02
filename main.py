@@ -558,7 +558,7 @@ async def _evm_chain_loop(analyzer, tracker, chain: str):
                             size = max(4.0, min(100.0, cap * (config.REINVEST_PERCENT / 100.0))) if cap > 0 else 4.0
                             _sig = analyzer.get_signal(addr)
                             if "LOTTERY" in _sig:
-                                size = min(size, 1.5)  # лотерейный билет, не позиция
+                                size = min(size, 3.0)  # лотерейный билет $3, не позиция
                             tracker.add_position(sym, addr, price, size, is_mature=True,
                                                  source=f"{tag}:{_sig}",
                                                  chain=chain)
@@ -613,6 +613,12 @@ async def async_main():
     from trade_logger import trade_logger
     from birdeye_scanner import birdeye_loop
     from sol_price import get_sol_price
+
+    try:
+        from radar_coverage import print_coverage
+        print_coverage()
+    except Exception as e:
+        print(f"⚠️ radar_coverage недоступен: {e}")
     
     # Получаем актуальную цену SOL при старте
     await get_sol_price()
