@@ -23,6 +23,7 @@ CHAINS = {
     "robinhood": {"min_liq": float(getattr(config, "ROBINHOOD_MIN_LIQUIDITY", 8000)), "tag": "ROBINHOOD"},
     "base": {"min_liq": 15000.0, "tag": "BASE"},
     "bsc": {"min_liq": 15000.0, "tag": "BSC"},
+    "ethereum": {"min_liq": 20000.0, "tag": "ETHEREUM"},
 }
 
 

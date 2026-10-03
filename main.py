@@ -410,6 +410,10 @@ async def fomo_signal_loop(analyzer, tracker):
                                 print(f"📲 TG EVM {mint[:10]}: ни в одной сети не найден.")
                                 continue
                             _ch, _td = found
+                            if _ch == "ethereum":
+                                # L1-входы выкл: газ $2-6 съедает скальп. Только ведём старые.
+                                print(f"🚫 TG EVM {mint[:10]}: сеть ethereum, входы выкл — скип.")
+                                continue
                             ok = await analyzer.analyze_robinhood_token(mint, _ch)
                             if ok is True and mint not in tracker.positions:
                                 _esig = analyzer.get_signal(mint)
@@ -679,6 +683,72 @@ async def bsc_loop(analyzer, tracker):
         return
     await _evm_chain_loop(analyzer, tracker, "bsc")
 
+
+async def ethereum_loop(analyzer, tracker):
+    """⬜ Ethereum: только ведём уже открытые (STOCKER/VERIDIA), новые входы выкл.
+    Газ L1 $2-6 съедает скальп — ловим только дешёвые L2. Без этой петли ETH-позиции
+    висят с вмёрзшей ценой (вход=сейчас=пик, $0.00)."""
+    import evm_data
+    print("⬜ Ethereum Loop запущен: только трекинг открытых (входы выкл).")
+    while True:
+        try:
+            mine = {}
+            for m, p in tracker.get_open_positions().items():
+                _ch = getattr(p, "chain", "")
+                _src = str(getattr(p, "source", ""))
+                if _ch == "ethereum":
+                    mine[m] = p
+                elif str(m).startswith("0x") and _ch == "solana" and "ETHEREUM" in _src:
+                    # Легаси-баг: старый fomo_loop открывал ETH без chain -> chain=solana.
+                    # Чиним на месте, иначе позиция-сирота (вход=сейчас=пик, $0.00).
+                    try:
+                        p.chain = "ethereum"
+                    except Exception:
+                        pass
+                    mine[m] = p
+                    print(f"⬜ ETH heal {m[:10]}: chain solana->ethereum ({_src[:40]})")
+            if mine:
+                try:
+                    px = await evm_data.get_bulk_prices(list(mine.keys()), "ethereum")
+                except Exception as e:
+                    print(f"⬜ ETH bulk price err: {e}")
+                    px = {}
+                import time as _t
+                for mint, pos in list(mine.items()):
+                    cur = px.get(mint, 0) or pos.current_price_usd or pos.entry_price_usd
+                    if cur > pos.max_price_usd:
+                        pos.max_price_usd = cur
+                        pos.peak_time = _t.time()
+                    prev = pos.current_price_usd
+                    pos.current_price_usd = cur
+                    if not pos.entry_price_usd:
+                        continue
+                    pnl = (cur - pos.entry_price_usd) / pos.entry_price_usd
+                    maxp = (pos.max_price_usd - pos.entry_price_usd) / pos.entry_price_usd
+                    pos.current_pnl_usd = pos.amount_usd * pnl
+                    held = (_t.time() - pos.entry_time) / 60
+                    reason = None
+                    prev_ts = getattr(pos, "price_checked_at", 0.0)
+                    if prev_ts and (_t.time() - prev_ts) < 60 and prev > 0 and cur <= prev * 0.80:
+                        reason = f"ETH Crash Guard ({(1 - cur / prev) * 100:.0f}%)"
+                    elif maxp >= 0.15 and (pos.max_price_usd - cur) / pos.max_price_usd >= 0.10:
+                        reason = f"ETH Trailing (peak +{maxp * 100:.0f}%)"
+                    elif pnl <= -0.30:
+                        reason = f"ETH Emergency Cap ({pnl * 100:.1f}%)"
+                    elif pnl <= config.STOP_LOSS_PCT:
+                        reason = f"ETH Stop ({pnl * 100:.1f}%)"
+                    elif held >= 15 and pnl < 0:
+                        reason = f"ETH Dead ({held:.0f}m)"
+                    elif held >= 7 and abs(pnl) < 0.05 and maxp < 0.05:
+                        reason = f"ETH Stagnant ({held:.0f}m)"
+                    pos.price_checked_at = _t.time()
+                    if reason:
+                        tracker.close_position(mint, cur, reason)
+                tracker.save_portfolio()
+        except Exception as e:
+            print(f"Ошибка в ethereum_loop: {e}")
+        await asyncio.sleep(25)
+
 async def async_main():
     from pump_fun_sniper import PumpFunSniper
     
@@ -760,6 +830,7 @@ async def async_main():
         robinhood_loop(analyzer, tracker),  # 🟣 EVM-мемы Robinhood Chain 4663
         base_loop(analyzer, tracker),  # 🟦 EVM-мемы Base (fomo.family)
         bsc_loop(analyzer, tracker),  # 🟨 BSC-мемы (GSTOCK и co)
+        ethereum_loop(analyzer, tracker),  # ⬜ Ethereum: только трекинг (входы выкл, газ)
         jup_loop(analyzer, tracker),  # 🪐 Jupiter recent + toptrending/5m (Solana)
         evm_wss_loop(analyzer, tracker),  # ⚡ WSS фабрик Base+BSC: новые пулы за секунды
         fomo_api_loop(analyzer, tracker),  # 📡 fomoapi.io: покупки топов -> очередь сигналов
@@ -801,6 +872,8 @@ def chain_badge(chain: str, long: bool = False) -> str:
         return "🟦 BASE" if long else "🟦"
     if c == "bsc":
         return "🟨 BSC" if long else "🟨"
+    if c == "ethereum":
+        return "⬜ ETH" if long else "⬜"
     return "🟢 SOL" if long else "🟢"
 
 
