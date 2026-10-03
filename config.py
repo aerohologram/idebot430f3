@@ -161,3 +161,31 @@ FAST_WINDOW_SEC = 120   # окно ранней тяги: уникальные b
 FAST_MIN_BUYERS = 6     # >=6 уникальных покупателей за 2 мин = горячий
 FAST_MIN_TRADES = 10    # или >=10 трейдов за окно
 FAST_EARLY_MAX_AGE_SEC = 180  # early-микро-вход только если токену <3 мин (DS ещё пуст)
+
+# === ДОП. ИСТОЧНИКИ (портировано из прим; фильтры режут мусор, как раньше) ===
+# Jupiter Tokens API v2 (free key: portal.jup.ag). Без ключа jup_loop спит.
+JUP_API_KEY = os.getenv("JUP_API_KEY", "")
+JUP_INTERVAL = 120
+
+# TG-превью коллов без ключей (t.me/s опрос). Пишет в fomo_signals.txt.
+TG_PREVIEW_ENABLED = True
+TG_PREVIEW_CHANNELS = ["pumpfunmemecalls", "pumpfunearlytrending", "cherrytrending"]
+TG_PREVIEW_INTERVAL = 90
+
+# fomoapi.io WS (покупки топов fomo.family). Без ключа — демо с задержкой 60с.
+FOMO_API_KEY = os.getenv("FOMO_API_KEY", "")
+FOMO_WS_ENABLED = True
+FOMO_FOLLOW_TRADERS = []
+FOMO_MIN_USD = 100
+FOMO_BOARDS_INTERVAL = 7200
+USE_FOMO_SIGNALS = True  # очередь fomo_signals.txt покупается через те же гейты
+MAX_FOMO_BUYS_PER_PASS = 3  # бёрст-контроль: не больше 3 входов за проход очереди
+TG_MAX_SIZE_USD = 4.0  # кэп TG/FOMO-входа (мусор из каналов — мелким сайзом)
+TG_VIP_SIZE_USD = 2.0
+ROB_MAX_SIZE_USD = 4.0
+
+# EVM factory WSS (новые пулы Base/BSC за секунды, без ключей, PublicNode)
+EVM_WSS_ENABLED = True
+
+# CoinGecko trending -> Solana-минты для GROWTH (без ключей, кэш 30 мин)
+COINGECKO_ENABLED = True

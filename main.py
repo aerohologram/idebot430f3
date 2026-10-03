@@ -342,6 +342,27 @@ async def scanner_loop(analyzer, tracker):
 from copytrader import CopyTrader
 import os
 
+def parse_signal_line(raw: str):
+    """Разбор строки очереди: 'sol:<mint>[@канал]' | 'evm:<chain>:<addr>[@канал]' | '0x...' | '<mint>'.
+    Тег @канал ставит tg_preview (видно в дашборде как TG-SIGNAL:канал:...)."""
+    raw = (raw or "").strip()
+    channel = ""
+    if "@" in raw:
+        raw, _, channel = raw.rpartition("@")
+        raw, channel = raw.strip(), channel.strip()
+    if raw.startswith("evm:"):
+        rest = raw[4:].strip()
+        if ":" in rest:
+            _chn, mint = rest.split(":", 1)
+            return f"evm:{_chn.strip().lower()}", mint.strip(), channel
+        return "evm", rest, channel
+    if raw.startswith("sol:"):
+        return "sol", raw[4:].strip(), channel
+    if raw.startswith("0x"):
+        return "evm", raw, channel
+    return "sol", raw, channel
+
+
 async def fomo_signal_loop(analyzer, tracker):
     print("📲 Запуск обработчика сигналов FOMO...")
     while True:
@@ -349,29 +370,86 @@ async def fomo_signal_loop(analyzer, tracker):
             if os.path.exists('fomo_signals.txt'):
                 with open('fomo_signals.txt', 'r') as f:
                     mints = f.read().splitlines()
-                
+
                 if mints:
                     # Очищаем файл после прочтения
                     with open('fomo_signals.txt', 'w') as f:
                         f.write('')
-                        
-                    for mint in mints:
-                        mint = mint.strip()
-                        if mint and mint not in tracker.positions:
-                            print(f"🚨 ПРИНЯТ ВНЕШНИЙ СИГНАЛ (FOMO): {mint}")
-                            # Проверяем скам-фильтрами перед покупкой
-                            is_good = await analyzer.analyze_token(mint)
-                            
-                            if is_good:
-                                pair_data = await analyzer.fetch_token_data(mint)
-                                entry_price = float(pair_data.get("priceUsd", 0)) if pair_data else 0
-                                actual_symbol = pair_data.get("baseToken", {}).get("symbol", "FOMO") if pair_data else "FOMO"
-                                
-                                if entry_price > 0:
-                                    capital = tracker.get_total_capital()
-                                    position_size = max(4.0, min(100.0, capital * (config.REINVEST_PERCENT / 100.0)))
-                                    tracker.add_position(actual_symbol, mint, entry_price, position_size,
-                                                         source=f"TG-SIGNAL:{analyzer.get_signal(mint)}")
+                    # Бёрст-контроль: очередь могла копиться — старые коллы = чужие вершины.
+                    # Берём 25 самых свежих, покупаем максимум 3 за проход.
+                    _maxpass = int(getattr(config, "MAX_FOMO_BUYS_PER_PASS", 3) or 3)
+                    mints = [m for m in mints if (m or "").strip()][-25:]
+                    _buys = 0
+                    for raw in mints:
+                        kind, mint, _src_ch = parse_signal_line(raw)
+                        if not mint or mint in tracker.positions:
+                            continue
+                        _tag = f"TG:{_src_ch} " if _src_ch else ""
+                        print(f"🚨 ПРИНЯТ ВНЕШНИЙ СИГНАЛ ({_tag}FOMO): {mint}")
+                        if kind == "evm" or kind.startswith("evm:"):
+                            import evm_data
+                            found = None
+                            if ":" in kind:
+                                _want = kind.split(":", 1)[1]
+                                try:
+                                    _td = await evm_data.get_token_data(mint, _want)
+                                except Exception:
+                                    _td = {}
+                                if _td and float(_td.get("priceUsd", 0) or 0) > 0:
+                                    found = (_want, _td)
+                            if not found:
+                                for _ch in ("base", "bsc", "robinhood"):
+                                    try:
+                                        _td = await evm_data.get_token_data(mint, _ch)
+                                    except Exception:
+                                        _td = {}
+                                    if _td and float(_td.get("priceUsd", 0) or 0) > 0:
+                                        found = (_ch, _td)
+                                        break
+                            if not found:
+                                print(f"📲 TG EVM {mint[:10]}: ни в одной сети не найден.")
+                                continue
+                            _ch, _td = found
+                            ok = await analyzer.analyze_robinhood_token(mint, _ch)
+                            if ok is True and mint not in tracker.positions:
+                                _esig = analyzer.get_signal(mint)
+                                price = float(_td.get("priceUsd", 0))
+                                sym = ((_td.get("baseToken") or {}).get("symbol", "TG") or "TG")
+                                if price > 0:
+                                    cap = tracker.get_total_capital()
+                                    size = max(4.0, min(100.0, cap * (config.REINVEST_PERCENT / 100.0))) if cap > 0 else 4.0
+                                    size = min(size, float(getattr(config, "TG_MAX_SIZE_USD", 4.0) or 4.0))
+                                    if "LOTTERY" in str(_esig):
+                                        size = min(size, 3.0)
+                                    if _ch == "robinhood":
+                                        size = min(size, float(getattr(config, "ROB_MAX_SIZE_USD", 4.0) or 4.0))
+                                    _tg_src = f"TG-SIGNAL:{_src_ch}:{_esig}" if _src_ch else f"TG-SIGNAL:{_esig}"
+                                    tracker.add_position(sym, mint, price, size, is_mature=True,
+                                                         source=_tg_src, chain=_ch)
+                                    print(f"📲 TG-SIGNAL BUY {sym} [{_ch}] @ ${price}")
+                                    _buys += 1
+                                    if _buys >= _maxpass:
+                                        break
+                            continue
+                        # Solana-ветка: те же гейты, что у сканера
+                        is_good = await analyzer.analyze_token(mint)
+
+                        if is_good:
+                            pair_data = await analyzer.fetch_token_data(mint)
+                            entry_price = float(pair_data.get("priceUsd", 0)) if pair_data else 0
+                            actual_symbol = pair_data.get("baseToken", {}).get("symbol", "FOMO") if pair_data else "FOMO"
+
+                            if entry_price > 0:
+                                capital = tracker.get_total_capital()
+                                position_size = max(4.0, min(100.0, capital * (config.REINVEST_PERCENT / 100.0)))
+                                position_size = min(position_size, float(getattr(config, "TG_MAX_SIZE_USD", 4.0) or 4.0))
+                                _ssig = analyzer.get_signal(mint)
+                                _tg_src = f"TG-SIGNAL:{_src_ch}:{_ssig}" if _src_ch else f"TG-SIGNAL:{_ssig}"
+                                tracker.add_position(actual_symbol, mint, entry_price, position_size,
+                                                     source=_tg_src)
+                                _buys += 1
+                                if _buys >= _maxpass:
+                                    break
         except Exception as e:
             print(f"Ошибка в fomo_signal_loop: {e}")
         await asyncio.sleep(1) # Проверяем файл каждую секунду для мгновенной реакции
@@ -430,7 +508,12 @@ async def growth_loop(analyzer, tracker):
                     len(tracker.get_open_positions()) < config.MAX_CONCURRENT_POSITIONS:
                 import market_data as _md
                 universe = await _md.get_growth_universe()
-                watch = list(dict.fromkeys(list(getattr(config, "GROWTH_WATCHLIST", [])) + universe))
+                try:
+                    import coingecko as _cg
+                    _cg_mints = await _cg.trending_solana_mints() or []
+                except Exception:
+                    _cg_mints = []
+                watch = list(dict.fromkeys(list(getattr(config, "GROWTH_WATCHLIST", [])) + universe + _cg_mints))
                 for mint in watch:
                     if mint in tracker.positions or len(tracker.get_open_positions()) >= config.MAX_CONCURRENT_POSITIONS:
                         continue
@@ -531,13 +614,18 @@ async def _evm_chain_loop(analyzer, tracker, chain: str):
                     if reason:
                         tracker.close_position(mint, cur, reason)
                 tracker.save_portfolio()
-            # --- 2. Скан новых: бусты + профили + тренды GT + СВЕЖИЕ пулы GT (ракеты до роста) ---
+            # --- 2. Скан новых: WSS-свежие (секунды) + бусты + профили + тренды GT + СВЕЖИЕ пулы GT ---
             if len(tracker.get_open_positions()) < config.MAX_CONCURRENT_POSITIONS:
+                try:
+                    import evm_wss as _evm_wss
+                    _wss_list = _evm_wss.drain_fresh(chain) or []
+                except Exception:
+                    _wss_list = []
                 boosted = await evm_data.fetch_boosted_tokens(chain)
                 profiles = await evm_data.fetch_profile_tokens(chain)
                 trending = await evm_data.get_trending_pools_gt(chain)
                 fresh = await evm_data.get_new_pools_gt(chain)
-                mints = list(dict.fromkeys(boosted + profiles + trending + fresh))[:35]
+                mints = list(dict.fromkeys(_wss_list + boosted + profiles + trending + fresh))[:35]
                 for addr in mints:
                     if not addr or addr in tracker.positions:
                         continue
@@ -635,6 +723,30 @@ async def async_main():
             await asyncio.sleep(300)
     
     from fast_stream import fast_stream_loop, fast_candidate_loop
+    try:
+        from jup_discovery import jup_loop
+    except Exception as e:
+        print(f"⚠️ jup_discovery недоступен ({e}) - пропускаю")
+        async def jup_loop(*_a, **_k):
+            return
+    try:
+        from evm_wss import evm_wss_loop
+    except Exception as e:
+        print(f"⚠️ evm_wss недоступен ({e}) - пропускаю")
+        async def evm_wss_loop(*_a, **_k):
+            return
+    try:
+        from fomo_api import fomo_api_loop
+    except Exception as e:
+        print(f"⚠️ fomo_api недоступен ({e}) - пропускаю")
+        async def fomo_api_loop(*_a, **_k):
+            return
+    try:
+        from tg_preview import tg_preview_loop
+    except Exception as e:
+        print(f"⚠️ tg_preview недоступен ({e}) - пропускаю")
+        async def tg_preview_loop(*_a, **_k):
+            return
     await asyncio.gather(
         position_manager_loop(analyzer, tracker),
         birth_wss_loop(analyzer, tracker),  # был определён но НЕ запущен — роддом стоял пустой!
@@ -648,6 +760,10 @@ async def async_main():
         robinhood_loop(analyzer, tracker),  # 🟣 EVM-мемы Robinhood Chain 4663
         base_loop(analyzer, tracker),  # 🟦 EVM-мемы Base (fomo.family)
         bsc_loop(analyzer, tracker),  # 🟨 BSC-мемы (GSTOCK и co)
+        jup_loop(analyzer, tracker),  # 🪐 Jupiter recent + toptrending/5m (Solana)
+        evm_wss_loop(analyzer, tracker),  # ⚡ WSS фабрик Base+BSC: новые пулы за секунды
+        fomo_api_loop(analyzer, tracker),  # 📡 fomoapi.io: покупки топов -> очередь сигналов
+        tg_preview_loop(analyzer, tracker),  # 📡 TG-коллы без ключей (t.me/s превью)
         growth_loop(analyzer, tracker),  # 🌱 тренды капов, пока нет ракет
         sniper.connect_and_listen(),  # ENABLED — с AI фильтром — sniper entry kills capital (-85.8%), mature +162.5%
         trade_logger.post_trade_watcher_loop(),
