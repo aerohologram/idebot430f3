@@ -11,9 +11,11 @@ _session = None
 
 # Лимиты бесплатных API (запросов в минуту на весь процесс).
 # DexScreener пары/поиск ~300/мин, профили/бусты ~60/мин,
+# НО Render сидит на shared outbound IP — квоту делим с соседями.
+# Поэтому DS занижен до 90/мин с запасом, иначе 429 слепит EVM-рукава.
 # GeckoTerminal ~30/мин, DeFiLlama без ключа - щадим, Jupiter keyless ~30/мин (0.5 RPS).
 HOST_LIMITS = {
-    "api.dexscreener.com": 240.0,
+    "api.dexscreener.com": 90.0,
     "api.geckoterminal.com": 25.0,
     "coins.llama.fi": 60.0,
     "api.llama.fi": 60.0,

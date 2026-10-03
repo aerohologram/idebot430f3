@@ -680,7 +680,7 @@ class Analyzer:
         # LOTTERY TIER: вертикаль m5 60-150% (HYPERCAT +73% мазал мимо кэпа 60%).
         # Билет $1.5, не позиция: риск bounded, верх открыт. h24-вершины (>500%) всё равно мимо.
         if 60.0 <= m5 <= 150.0 and h24 <= 500.0:
-            if (b5 + s5) >= 20 and (s5 == 0 or b5 >= s5) and liq >= 20000 and links:
+            if (b5 + s5) >= 15 and (s5 == 0 or b5 >= s5) and liq >= 15000 and links:
                 print(f"🎰 [{tag}-LOTTERY] {symbol}: вертикаль m5 {m5:+.1f}% — лотерейный билет.")
                 self._set_sig(address, f"{tag} LOTTERY {m5:+.0f}%")
                 return True

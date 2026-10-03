@@ -8,8 +8,12 @@
 
 Важно: slug "robinhood", НЕ "4663" (тот молча вернёт пусто).
 """
+import time as _t
 import config
 from http_client import fetch_json
+
+# chain,addr_lower -> (ts, best_pair). TTL 60с против 429 на shared IP.
+_TD_CACHE: dict = {}
 
 SLUG = getattr(config, "ROBINHOOD_DS_SLUG", "robinhood")
 DS = "https://api.dexscreener.com"
@@ -50,6 +54,13 @@ async def fetch_profile_tokens(chain: str = SLUG) -> list:
 async def get_token_data(address: str, chain: str = SLUG) -> dict:
     """Все пулы токена в сети chain, лучший по ликвидности.
     Возвращает пару в форме DexScreener (как Solana) + _chain."""
+    # Кэш 60с: один и тот же кандидат опрашивается несколькими петлями,
+    # без кэша это N лишних token-pairs вызовов и 429 на shared IP Render.
+    _key = (chain, (address or "").lower())
+    _now = _t.time()
+    _hit = _TD_CACHE.get(_key)
+    if _hit and _now - _hit[0] < 60:
+        return _hit[1]
     status, data = await fetch_json(
         f"{DS}/token-pairs/v1/{chain}/{address}", timeout=10, retries=2)
     if status != 200 or not data:
@@ -64,6 +75,9 @@ async def get_token_data(address: str, chain: str = SLUG) -> dict:
     best["_source"] = f"dexscreener-{chain}"
     best["_chain"] = chain
     best["_socials_unknown"] = False
+    _TD_CACHE[_key] = (_now, best)
+    if len(_TD_CACHE) > 2000:
+        _TD_CACHE.clear()
     return best
 
 
