@@ -216,6 +216,124 @@ async def birth_wss_loop(analyzer, tracker):
             print(f"Ошибка WSS Роддома: {e}. Переподключение через 5 секунд...")
             await asyncio.sleep(5)
 
+async def scout_loop(analyzer, tracker):
+    """🔭 SCOUT: ранний рукав по возрасту + velocity (SPEC-кейс).
+    Ловит токены 1-12 мин с живой тягой WSS ДО вертикали m5, пока DS-индекс пуст.
+    Триггер: возраст + buyers/trades/vol по PumpPortal WSS (без DS).
+    Подтверждение: DS/Gecko pair_data (liq, m1 не дамп, h24 не перегрев).
+    Сайз $3 билет, макс 3 скаута открыто, кулдаун 300с. Выходы — общие mature."""
+    print("🔭 Scout Loop запущен: возраст 1-12 мин + velocity (ранние ракеты).")
+    if not getattr(config, "SCOUT_ENABLED", True):
+        print("🔭 Scout отключён в config (SCOUT_ENABLED=False).")
+        return
+    processed = {}
+    interval = int(getattr(config, "SCOUT_INTERVAL", 20) or 20)
+    while True:
+        try:
+            import time as _t
+            # Kill-switch общий
+            day_start = _t.time() - (_t.time() % 86400)
+            day_pnl = sum(getattr(p, "pnl_usd", 0) or 0 for p in tracker.positions.values()
+                          if getattr(p, "status", "") == "closed" and getattr(p, "exit_time", 0) and p.exit_time >= day_start)
+            if getattr(config, "KILL_SWITCH_ENABLED", True) and day_pnl <= -config.MAX_DAILY_LOSS_USD:
+                await asyncio.sleep(300)
+                continue
+            scout_open = sum(1 for p in tracker.get_open_positions().values()
+                             if str(getattr(p, "source", "")).startswith("SCOUT"))
+            if len(tracker.get_open_positions()) >= config.MAX_CONCURRENT_POSITIONS or \
+                    scout_open >= int(getattr(config, "SCOUT_MAX_POS", 3) or 3):
+                await asyncio.sleep(interval)
+                continue
+            # Кандидаты: WSS-реестр 1-12 мин с тягой
+            cands = []
+            try:
+                import fast_stream as _fs
+                _min_age = int(getattr(config, "SCOUT_MIN_AGE_SEC", 60) or 60)
+                _max_age = int(getattr(config, "SCOUT_MAX_AGE_SEC", 720) or 720)
+                _min_buy = int(getattr(config, "SCOUT_MIN_BUYERS", 5) or 5)
+                _min_tr = int(getattr(config, "SCOUT_MIN_TRADES", 15) or 15)
+                for _m, _r in list(_fs._registry.items()):
+                    _age = _t.time() - _r.get("first_seen", 0)
+                    if _age < _min_age or _age > _max_age:
+                        continue
+                    if len(_r.get("buyers", ())) >= _min_buy or _r.get("trades", 0) >= _min_tr:
+                        cands.append((_m, _age, len(_r.get("buyers", ())), _r.get("trades", 0)))
+            except Exception as _e:
+                cands = []
+            # Старше WSS-окна — добор из birth (DS уже проиндексировал, velocity по API)
+            if not cands:
+                try:
+                    _bm = birth_tracker.get_mature_tokens(1, 12)
+                    cands = [(_m, 0, 0, 0) for _m in _bm[:20]]
+                except Exception:
+                    pass
+            for _mint, _age, _buyers, _trades in cands[:20]:
+                if not _mint or _mint in tracker.positions:
+                    continue
+                if _t.time() - processed.get(_mint, 0.0) < int(getattr(config, "SCOUT_RECOOLDOWN", 300) or 300):
+                    continue
+                # DS ещё пуст на 1-3 мин — не хороним на 600с, повторим пока возраст <12 мин
+                try:
+                    _td = await analyzer.fetch_token_data(_mint)
+                except Exception:
+                    _td = {}
+                if not _td:
+                    continue
+                try:
+                    _pc = _td.get("priceChange") or {}
+                    _m1 = float(_pc.get("m1", 0) or 0)
+                    _h1 = float(_pc.get("h1", 0) or 0)
+                    _h24 = float(_pc.get("h24", 0) or 0)
+                    _tx5 = (_td.get("txns") or {}).get("m5", {}) or {}
+                    _b5, _s5 = int(_tx5.get("buys", 0) or 0), int(_tx5.get("sells", 0) or 0)
+                    _liq = float((_td.get("liquidity") or {}).get("usd", 0) or 0)
+                    _vol = _td.get("volume") or {}
+                    _vm5 = float(_vol.get("m5", 0) or 0)
+                    _price = float(_td.get("priceUsd", 0) or 0)
+                    _sym = ((_td.get("baseToken") or {}).get("symbol", "") or _mint[:4])[:12]
+                except Exception:
+                    continue
+                if _liq < float(getattr(config, "SCOUT_MIN_LIQ", 15000) or 0):
+                    processed[_mint] = _t.time()
+                    continue
+                if _m1 <= float(getattr(config, "SCOUT_MAX_DUMP_M1", -0.15) or -0.15) * 100:
+                    processed[_mint] = _t.time()
+                    continue
+                if _h1 > 300.0 or _h24 > 500.0:
+                    processed[_mint] = _t.time()
+                    continue
+                if (_b5 + _s5) < 10 or (_s5 > 0 and _b5 < _s5):
+                    processed[_mint] = _t.time()
+                    continue
+                _up = str(_sym).upper()
+                if any(k in _up for k in ("TEST", "SCAM", "HONEYPOT")):
+                    processed[_mint] = _t.time()
+                    continue
+                if _price <= 0:
+                    continue
+                # Экспозиция: не больше 60% капитала в рынке
+                _size = float(getattr(config, "SCOUT_SIZE_USD", 3.0) or 3.0)
+                try:
+                    _deployed = sum(p.amount_usd for p in tracker.get_open_positions().values())
+                    _cap = tracker.get_total_capital() * getattr(config, "MAX_DEPLOYED_PCT", 0.60)
+                    if _deployed + _size > _cap:
+                        print(f"🚫 SCOUT отказ (Exposure): занято ${_deployed:.0f}.")
+                        break
+                except Exception:
+                    pass
+                _age_m = f"{_age/60:.0f}m" if _age else "birth"
+                tracker.add_position(_sym, _mint, _price, _size, is_mature=True,
+                                     source=f"SCOUT:{_age_m} v{_trades}/{_buyers}")
+                print(f"🔭 SCOUT BUY {_sym} {_age_m} buyers={_buyers} tr={_trades} @ ${_price}")
+                processed[_mint] = _t.time()
+                break
+            if len(processed) > 1000:
+                processed.clear()
+        except Exception as e:
+            print(f"Ошибка в scout_loop: {e}")
+        await asyncio.sleep(interval)
+
+
 async def scanner_loop(analyzer, tracker):
     print("🚀 Запуск PhantBot Scanner (Поиск новых монет)...")
     processed_mints = {}
@@ -824,6 +942,7 @@ async def async_main():
         fast_stream_loop(),  # ⚡ 0-сек discovery NewToken + trades
         fast_candidate_loop(analyzer, tracker),  # ⚡ горячие свежие мимо 600с бана
         scanner_loop(analyzer, tracker),
+        scout_loop(analyzer, tracker),  # 🔭 ранние 1-12 мин по velocity (SPEC-кейс)
         copy_trader.listen(),
         fomo_signal_loop(analyzer, tracker),
         fomo_loop(analyzer, tracker),

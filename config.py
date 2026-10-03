@@ -189,3 +189,18 @@ EVM_WSS_ENABLED = True
 
 # CoinGecko trending -> Solana-минты для GROWTH (без ключей, кэш 30 мин)
 COINGECKO_ENABLED = True
+
+# === SCOUT (ранний рукав: возраст 1-12 мин + velocity WSS, SPEC-кейс) ===
+# Триггер по WSS-реестру (без DS): тяга есть, вертикаль m5 ещё не обязательно видна.
+# Подтверждение по DS/Gecko: ликва, m1 не дамп, h24 не перегрев. Билет $3.
+SCOUT_ENABLED = True
+SCOUT_INTERVAL = 20  # опрос реестра каждые 20с
+SCOUT_MIN_AGE_SEC = 60  # младше 1 мин — шум создания, DS пуст
+SCOUT_MAX_AGE_SEC = 720  # старше 12 мин — уже сканер/lottery, не скаут
+SCOUT_MIN_BUYERS = 5  # ≥5 уникальных покупателей WSS за окно
+SCOUT_MIN_TRADES = 15  # или ≥15 трейдов WSS
+SCOUT_MIN_LIQ = 15000  # пул от $15k (slippage $3 < 2%)
+SCOUT_MAX_DUMP_M1 = -0.15  # m1 хуже -15% — дамп, не откат
+SCOUT_SIZE_USD = 3.0
+SCOUT_MAX_POS = 3  # не больше 3 скаутов открыто
+SCOUT_RECOOLDOWN = 300  # перепроверка отклонённых через 5 мин
