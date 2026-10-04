@@ -39,6 +39,10 @@ SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip().strip('"').strip("'")
 
 # Paper Trading Config
 PAPER_PORTFOLIO_FILE = "portfolio.json"
+# Ключ слепка в Supabase. ВАЖНО: у каждого бота свой, иначе два бота на одной
+# базе перезаписывают друг друга (сделки появляются и пропадают).
+# Задай в Render → Environment: первый бот PF_IDEBOT, второй PF_QYO7.
+PORTFOLIO_SNAPSHOT_MINT = (os.getenv("PORTFOLIO_SNAPSHOT_MINT", "") or "").strip().strip('"').strip("'") or "PORTFOLIO_STATE_V3"
 INITIAL_BALANCE_USD = 120.0  # торговый пул ($150 депо - $30 газ)    # Стартовый капитал
 REINVEST_PERCENT = 5.0  # Было 3%: цель $10/день требует сайз. 5% пула на сделку
 VIRTUAL_POSITION_SIZE_USD = 4.0
@@ -204,3 +208,9 @@ SCOUT_MAX_DUMP_M1 = -0.15  # m1 хуже -15% — дамп, не откат
 SCOUT_SIZE_USD = 3.0
 SCOUT_MAX_POS = 3  # не больше 3 скаутов открыто
 SCOUT_RECOOLDOWN = 300  # перепроверка отклонённых через 5 мин
+SCOUT_BIRTH_FALLBACK = False  # birth-добор без WSS тяги ВЫКЛ: тащил раги v0/0 (AMM/XRPN/CLTR)
+
+# === SECURITY GATES (бесплатно, без ключей, кэш 1ч, fail-open) ===
+GOPLUS_ENABLED = True
+GOPLUS_MAX_SELL_TAX = 0.10
+GOPLUS_CACHE_SEC = 3600

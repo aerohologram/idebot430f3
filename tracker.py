@@ -68,7 +68,7 @@ class PaperTracker:
         sb = self._supabase()
         if sb is not None:
             try:
-                res = sb.table("trades_pump").select("features").eq("mint", "PORTFOLIO_STATE_V3").execute()
+                res = sb.table("trades_pump").select("features").eq("mint", config.PORTFOLIO_SNAPSHOT_MINT).execute()
                 if res.data and res.data[0].get("features"):
                     data = json.loads(res.data[0]["features"])
                     if data:
@@ -142,15 +142,42 @@ class PaperTracker:
         # пустая память + живой слепок в облаке = не трогаем облако.
         if not data:
             return
-        # backoff: битый Supabase не долбим каждые 2с (иначе спам в логах)
+        # СЛИЯНИЕ вместо перезаписи: слепок пишется целиком, поэтому рестарт
+        # с пустой памятью + 1 новая сделка стирал всю историю.
+        # Перед записью подтягиваем облачный слепок (троттлинг 60с, чтобы не
+        # дёргать API каждые 2с) и вносим всё, чего нет в памяти.
         if getattr(self, "_sb_dead_until", 0) and time.time() < self._sb_dead_until:
             return
         sb = self._supabase()
         if sb is None:
             return
         try:
+            if time.time() - getattr(self, "_merge_ts", 0.0) > 60:
+                try:
+                    _res = sb.table("trades_pump").select("features").eq("mint", config.PORTFOLIO_SNAPSHOT_MINT).execute()
+                    if _res.data and _res.data[0].get("features"):
+                        _cloud = json.loads(_res.data[0]["features"])
+                        _added = 0
+                        for _k, _v in _cloud.items():
+                            if _k not in data and isinstance(_v, dict):
+                                try:
+                                    self.positions[_k] = VirtualPosition(**_v)
+                                    data[_k] = getattr(self.positions[_k], "model_dump", self.positions[_k].dict)()
+                                    _added += 1
+                                except Exception:
+                                    continue
+                        if _added:
+                            print(f"🧩 save_portfolio: подтянул {_added} поз. из облака (история не теряется).")
+                            try:
+                                with open(self.filename, 'w') as f:
+                                    json.dump(data, f, indent=4)
+                            except Exception:
+                                pass
+                except Exception as _me:
+                    print(f"⚠️ save_merge пропуск: {type(_me).__name__}")
+                self._merge_ts = time.time()
             sb.table("trades_pump").upsert({
-                "mint": "PORTFOLIO_STATE_V3",
+                "mint": config.PORTFOLIO_SNAPSHOT_MINT,
                 "features": json.dumps(data),
                 "confidence": 0,
                 "status": "SYSTEM"

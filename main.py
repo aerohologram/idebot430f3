@@ -274,11 +274,11 @@ async def scout_loop(analyzer, tracker):
                             cands.append((_m, _age, len(_r.get("buyers", ())), _r.get("trades", 0)))
             except Exception as _e:
                 cands = []
-            # Старше WSS-окна — добор из birth (DS уже проиндексировал).
-            # НО: без WSS-velocity это дублирует scanner_loop с более слабыми гейтами
-            # (так купили AMM v0/0 → -100%). Поэтому birth-кандидатов требуем ЖЁСТЧЕ:
-            # velocity по DS как у сканера (tx5≥30, buys≥sells×1.5), иначе скип.
-            if not cands:
+            # Birth-фолбэк ВЫКЛЮЧЕН по умолчанию (SCOUT_BIRTH_FALLBACK=False):
+            # без WSS-velocity это дублирует scanner слабыми гейтами и тащит раги
+            # (AMM/XRPN/SHIB/SSHIB/CLTR v0/0 → Crash Guard -21..-97% за секунды).
+            # Только живая тяга WSS. Второй бот такие не покупает — и правильно.
+            if not cands and getattr(config, "SCOUT_BIRTH_FALLBACK", False):
                 try:
                     _bm = birth_tracker.get_mature_tokens(1, 12)
                     cands = [(_m, 0, 0, 0) for _m in _bm[:20]]
@@ -334,6 +334,17 @@ async def scout_loop(analyzer, tracker):
                     continue
                 if _price <= 0:
                     continue
+                # Security-гейты: раги (-21..-97% за секунды) DS-velocity не ловит —
+                # налог/honeypot зашит в transfer-логику. Бесплатно, кэш 1ч, fail-open.
+                try:
+                    import goplus as _sgp
+                    _gok, _gwhy = await _sgp.check_solana(_mint)
+                    if not _gok:
+                        print(f"🚫 SCOUT {_sym}: GoPlus {_gwhy} — блок.")
+                        processed[_mint] = _t.time()
+                        continue
+                except Exception as _se:
+                    print(f"⚠️ SCOUT security err: {type(_se).__name__} (fail-open).")
                 # Экспозиция: не больше 60% капитала в рынке
                 _size = float(getattr(config, "SCOUT_SIZE_USD", 3.0) or 3.0)
                 try:
@@ -1029,7 +1040,7 @@ def load_dashboard_portfolio():
         if url and key:
             from supabase import create_client
             sb = create_client(url, key)
-            res = sb.table("trades_pump").select("features").eq("mint", "PORTFOLIO_STATE_V3").execute()
+            res = sb.table("trades_pump").select("features").eq("mint", config.PORTFOLIO_SNAPSHOT_MINT).execute()
             if res.data and res.data[0].get("features"):
                 data = json.loads(res.data[0]["features"])
                 if data:
@@ -1144,7 +1155,7 @@ with tab1:
             _src = st.session_state.get("_pf_src", "?")
             _has_env = bool(getattr(config, 'SUPABASE_URL', None) and getattr(config, 'SUPABASE_KEY', None))
             st.warning(f"Файл портфеля пуст. Источник: {_src} | Supabase env: {'OK' if _has_env else 'НЕТ (данные живут только в RAM и умрут при рестарте Render!)'}")
-            st.caption("Проверь: 1) Render → Environment → SUPABASE_URL / SUPABASE_KEY заданы и сделан Redeploy. 2) В Supabase таблица trades_pump содержит строку mint=PORTFOLIO_STATE_V3. 3) Логи Render: ищи 'Портфель успешно загружен' или 'Supabase недоступен (PGRST125)'. Закрытые сделки при этом живы в журнале trades_pump/trades_raydium (status=CLOSED) — слепок можно восстановить.")
+            st.caption("Проверь: 1) Render → Environment → SUPABASE_URL / SUPABASE_KEY заданы и сделан Redeploy. 2) В Supabase таблица trades_pump содержит строку mint=<твой PORTFOLIO_SNAPSHOT_MINT> (у каждого бота свой!). 3) Логи Render: ищи 'Портфель успешно загружен' или 'Supabase недоступен (PGRST125)'. Закрытые сделки при этом живы в журнале trades_pump/trades_raydium (status=CLOSED) — слепок можно восстановить.")
     except FileNotFoundError:
         st.info("Бот еще не совершил первую сделку.")
 

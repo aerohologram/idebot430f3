@@ -23,7 +23,9 @@ def fetch():
         if len(r.data) < 1000:
             break
         off += 1000
-    return [d for d in rows if d.get("mint") != "PORTFOLIO_STATE_V3"]
+    import config as _cj
+    _snap = getattr(_cj, "PORTFOLIO_SNAPSHOT_MINT", "PORTFOLIO_STATE_V3")
+    return [d for d in rows if d.get("mint") != _snap and d.get("mint") != "PORTFOLIO_STATE_V3"]
 
 
 def main():
