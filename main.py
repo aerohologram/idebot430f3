@@ -244,21 +244,34 @@ async def scout_loop(analyzer, tracker):
                     scout_open >= int(getattr(config, "SCOUT_MAX_POS", 3) or 3):
                 await asyncio.sleep(interval)
                 continue
-            # Кандидаты: WSS-реестр 1-12 мин с тягой
+            # Кандидаты: сначала РАЗГОН (acceleration до вертикали m5),
+            # потом горячие по абсолютным порогам. Общее у ракет до роста:
+            # цена плоская, поток покупателей уже ускоряется (CCLAW/EQMODE-кейсы).
             cands = []
             _birth_strict = False
+            _accel = []
             try:
                 import fast_stream as _fs
                 _min_age = int(getattr(config, "SCOUT_MIN_AGE_SEC", 60) or 60)
                 _max_age = int(getattr(config, "SCOUT_MAX_AGE_SEC", 720) or 720)
                 _min_buy = int(getattr(config, "SCOUT_MIN_BUYERS", 5) or 5)
                 _min_tr = int(getattr(config, "SCOUT_MIN_TRADES", 15) or 15)
+                try:
+                    _accel = _fs.get_accelerating(_min_age, _max_age) or []
+                except Exception:
+                    _accel = []
+                for _m, _score, _age, _b, _t2 in _accel:
+                    _r = _fs._registry.get(_m, {})
+                    cands.append((_m, _age, _b, _t2))
+                if _accel:
+                    print(f"🔭 SCOUT: разгон {len(_accel)} ({', '.join(f'{m[:6]}:{s}' for m, s, _, _, _ in _accel[:5])})")
                 for _m, _r in list(_fs._registry.items()):
                     _age = _t.time() - _r.get("first_seen", 0)
                     if _age < _min_age or _age > _max_age:
                         continue
                     if len(_r.get("buyers", ())) >= _min_buy or _r.get("trades", 0) >= _min_tr:
-                        cands.append((_m, _age, len(_r.get("buyers", ())), _r.get("trades", 0)))
+                        if not any(c[0] == _m for c in cands):
+                            cands.append((_m, _age, len(_r.get("buyers", ())), _r.get("trades", 0)))
             except Exception as _e:
                 cands = []
             # Старше WSS-окна — добор из birth (DS уже проиндексировал).

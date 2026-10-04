@@ -111,6 +111,32 @@ def note_trade(data: dict):
         if trader:
             r["buyers"].add(trader)
         r["vol_sol"] += abs(sol_amt)
+    # Поминутные корзины для acceleration: отличаем разгон FOMO от вялой капели.
+    # Ракеты до взлёта выглядят как ускорение 2-й минуты к 1-й, а не абсолютные цифры.
+    try:
+        _now = time.time()
+        _bkt = int(_now // 60)
+        _bkts = r.setdefault("buckets", {})
+        _b = _bkts.get(_bkt)
+        if _b is None:
+            _b = {"trades": 0, "vol": 0.0, "buyers": set(), "mcap": 0.0}
+            _bkts[_bkt] = _b
+        _b["trades"] += 1
+        if tx_type == "buy":
+            _b["vol"] += abs(sol_amt)
+            if trader:
+                _b["buyers"].add(trader)
+        try:
+            _mc2 = float(data.get("marketCapSol", 0) or 0)
+            if _mc2 > 0:
+                _b["mcap"] = _mc2
+        except Exception:
+            pass
+        # Чистим старше 12 мин (память под контролем при 300 минтах)
+        for _k in [k for k in _bkts if _k < _bkt - 12]:
+            _bkts.pop(_k, None)
+    except Exception:
+        pass
 
 
 def get_hot_fresh(max_age_sec: int = 0) -> list:
@@ -139,6 +165,54 @@ def get_stats(mint: str) -> dict:
     return {"buyers": len(r.get("buyers", ())), "trades": r.get("trades", 0),
             "age_sec": time.time() - r.get("first_seen", 0),
             "last_mcap_sol": r.get("last_mcap_sol", 0)}
+
+
+def get_accelerating(min_age_sec: int = 60, max_age_sec: int = 720) -> list:
+    """Ракеты до взлёта: ускорение 2-й минуты к 1-й по трейдам/покупателям/объёму.
+
+    Общее у всех наших +100-1600% до роста (CCLAW, EQMODE, WINSTREAK, STMINT):
+    цена ещё плоская (m5 мал), а поток покупателей уже разгоняется.
+    Абсолютные пороги (buyers>=5) это ловят поздно — тут именно наклон.
+    Возвращает [(mint, score, age_sec, buyers, trades), ...] по убыванию score.
+    """
+    now = time.time()
+    cur_bkt = int(now // 60)
+    out = []
+    for mint, r in list(_registry.items()):
+        try:
+            age = now - r.get("first_seen", 0)
+            if age < min_age_sec or age > max_age_sec:
+                continue
+            bkts = r.get("buckets") or {}
+            b1 = bkts.get(cur_bkt - 1) or {}
+            b2 = bkts.get(cur_bkt) or {}
+            t1, t2 = b1.get("trades", 0), b2.get("trades", 0)
+            u1, u2 = len(b1.get("buyers", ())), len(b2.get("buyers", ()))
+            v1, v2 = b1.get("vol", 0.0), b2.get("vol", 0.0)
+            # Нужен минимум потока в обеих минутах, иначе делим шум на ноль
+            if t1 + t2 < 8 or u1 + u2 < 4:
+                continue
+            # Одна whale-свеча без покупателей = wash, не FOMO
+            if u2 < 2 and t2 >= 10:
+                continue
+            tr_acc = t2 / max(1.0, float(t1))
+            bu_acc = u2 / max(1.0, float(u1))
+            vo_acc = v2 / max(0.001, float(v1)) if (v1 + v2) > 0 else 1.0
+            # Разгон только вверх: затухание (acc<1) не ранжируем
+            if tr_acc < 1.2 and bu_acc < 1.2:
+                continue
+            score = tr_acc * 1.0 + bu_acc * 1.5 + min(vo_acc, 5.0) * 0.5
+            # Бонус за растущую капу bonding-кривой (mcap ползёт к градуации)
+            m1cap = b1.get("mcap", 0) or 0
+            m2cap = b2.get("mcap", 0) or 0
+            if m2cap > m1cap > 0:
+                score += 0.5
+            out.append((mint, round(score, 2), age,
+                        len(r.get("buyers", ())), r.get("trades", 0)))
+        except Exception:
+            continue
+    out.sort(key=lambda x: x[1], reverse=True)
+    return out[:30]
 
 
 async def fast_stream_loop():
