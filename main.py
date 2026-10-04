@@ -246,6 +246,7 @@ async def scout_loop(analyzer, tracker):
                 continue
             # Кандидаты: WSS-реестр 1-12 мин с тягой
             cands = []
+            _birth_strict = False
             try:
                 import fast_stream as _fs
                 _min_age = int(getattr(config, "SCOUT_MIN_AGE_SEC", 60) or 60)
@@ -260,11 +261,15 @@ async def scout_loop(analyzer, tracker):
                         cands.append((_m, _age, len(_r.get("buyers", ())), _r.get("trades", 0)))
             except Exception as _e:
                 cands = []
-            # Старше WSS-окна — добор из birth (DS уже проиндексировал, velocity по API)
+            # Старше WSS-окна — добор из birth (DS уже проиндексировал).
+            # НО: без WSS-velocity это дублирует scanner_loop с более слабыми гейтами
+            # (так купили AMM v0/0 → -100%). Поэтому birth-кандидатов требуем ЖЁСТЧЕ:
+            # velocity по DS как у сканера (tx5≥30, buys≥sells×1.5), иначе скип.
             if not cands:
                 try:
                     _bm = birth_tracker.get_mature_tokens(1, 12)
                     cands = [(_m, 0, 0, 0) for _m in _bm[:20]]
+                    _birth_strict = True
                 except Exception:
                     pass
             for _mint, _age, _buyers, _trades in cands[:20]:
@@ -305,6 +310,11 @@ async def scout_loop(analyzer, tracker):
                 if (_b5 + _s5) < 10 or (_s5 > 0 and _b5 < _s5):
                     processed[_mint] = _t.time()
                     continue
+                if _birth_strict and _trades == 0 and _buyers == 0:
+                    # Нет WSS-доказательства тяги — требуем как сканер, иначе это AMM-кейс
+                    if (_b5 + _s5) < 30 or (_s5 > 0 and _b5 < _s5 * 1.5):
+                        processed[_mint] = _t.time()
+                        continue
                 _up = str(_sym).upper()
                 if any(k in _up for k in ("TEST", "SCAM", "HONEYPOT")):
                     processed[_mint] = _t.time()
